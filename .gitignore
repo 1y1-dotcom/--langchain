@@ -9,3 +9,7 @@ __pycache__/
 install.log
 *.db
 *.sqlite
+
+# Office 临时文件与截图
+~$*
+屏幕截图*.png
