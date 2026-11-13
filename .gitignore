@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 密钥与本地产物
+.env
+.env-example
+install.log
+*.db
+*.sqlite

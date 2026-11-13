@@ -1,0 +1,12 @@
+# 复现工程依赖（Python 3.10+）
+# 安装： .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+langchain>=1.0
+langchain-openai>=1.0
+langchain-text-splitters>=1.0
+langgraph>=1.0
+langgraph-checkpoint-sqlite>=2.0
+python-dotenv>=1.0
+loguru>=0.7
+numpy>=1.26          # InMemoryVectorStore 计算余弦相似度
+grandalf>=0.8        # 打印 LCEL / LangGraph 图结构
