@@ -9,6 +9,8 @@ __pycache__/
 install.log
 *.db
 *.sqlite
+data/rag_settings.json
+data/rag_settings.json.tmp
 
 # Office 临时文件与截图
 ~$*

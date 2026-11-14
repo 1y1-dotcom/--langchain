@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -61,12 +62,63 @@ SEED_DOCS: list[tuple[str, str]] = [
     ),
 ]
 
-# 切块规则与 09/16 号脚本保持一致
-SPLITTER = RecursiveCharacterTextSplitter(
-    chunk_size=120,
-    chunk_overlap=20,
-    separators=["\n\n", "\n", "。", ""],
-)
+# 网页版默认切块规则与 09/16 号脚本一致，之后可在页面中调整并持久化。
+RAG_SETTINGS_PATH = BASE_DIR / "data" / "rag_settings.json"
+DEFAULT_RAG_SETTINGS = {"chunk_size": 120, "chunk_overlap": 20}
+RAG_LIMITS = {
+    "chunk_size": {"min": 50, "max": 500},
+    "chunk_overlap": {"min": 0, "max": 100},
+}
+
+
+def _validate_rag_settings(chunk_size, chunk_overlap) -> dict:
+    """严格校验前端配置，布尔值和小数都不作为合法整数接受。"""
+    values = {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} 必须是整数")
+        limits = RAG_LIMITS[name]
+        if not limits["min"] <= value <= limits["max"]:
+            raise ValueError(f"{name} 必须在 {limits['min']}~{limits['max']} 之间")
+    if chunk_overlap >= chunk_size:
+        raise ValueError("重叠字符数必须小于切块大小")
+    return {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}
+
+
+def _load_rag_settings() -> dict:
+    """读取持久化配置；文件缺失、损坏或越界时回退默认值。"""
+    try:
+        payload = json.loads(RAG_SETTINGS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("配置根节点必须是对象")
+        return _validate_rag_settings(payload.get("chunk_size"), payload.get("chunk_overlap"))
+    except FileNotFoundError:
+        return DEFAULT_RAG_SETTINGS.copy()
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        print(f"[settings] 切块配置不可用，使用默认值：{exc}")
+        return DEFAULT_RAG_SETTINGS.copy()
+
+
+def _save_rag_settings(settings: dict) -> None:
+    """先写临时文件再原子替换，避免服务中断留下半个 JSON。"""
+    RAG_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = RAG_SETTINGS_PATH.with_name(RAG_SETTINGS_PATH.name + ".tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as file:
+            json.dump(settings, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        temp_path.replace(RAG_SETTINGS_PATH)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+_RAG_SETTINGS = _load_rag_settings()
+
+
+def get_rag_settings() -> dict:
+    return _RAG_SETTINGS.copy()
 
 # 模型只创建一次，config 里已做 lru_cache
 MODEL = config.get_chat_model(temperature=0)
@@ -188,26 +240,52 @@ def delete_document(doc_id: int) -> bool:
     return deleted
 
 
+def _build_index(documents: list[dict], settings: dict):
+    """在局部变量中构建候选索引，成功前不影响正在使用的旧索引。"""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=settings["chunk_size"],
+        chunk_overlap=settings["chunk_overlap"],
+        separators=["\n\n", "\n", "。", ""],
+    )
+    chunks: list[Document] = []
+    for doc in documents:
+        chunk_doc = Document(
+            page_content=doc["content"],
+            metadata={"topic": doc["topic"], "doc_id": doc["id"]},
+        )
+        chunks.extend(splitter.split_documents([chunk_doc]))
+
+    embeddings = config.get_embeddings()
+    if chunks:
+        store = InMemoryVectorStore.from_documents(chunks, embeddings)
+    else:
+        store = InMemoryVectorStore(embedding=embeddings)
+    return store, len(chunks)
+
+
 def rebuild_index() -> int:
-    """把数据库里的文档重新切块、向量化，返回片段数量。"""
+    """按当前已保存配置重建全部文档，成功后一次性切换索引。"""
     global _VECTOR_STORE, _CHUNK_COUNT
 
     with _INDEX_LOCK:
-        chunks: list[Document] = []
-        for doc in list_documents():
-            chunk_doc = Document(
-                page_content=doc["content"],
-                metadata={"topic": doc["topic"], "doc_id": doc["id"]},
-            )
-            chunks.extend(SPLITTER.split_documents([chunk_doc]))
+        store, chunk_count = _build_index(list_documents(), _RAG_SETTINGS)
+        _VECTOR_STORE = store
+        _CHUNK_COUNT = chunk_count
+        return _CHUNK_COUNT
 
-        _CHUNK_COUNT = len(chunks)
-        embeddings = config.get_embeddings()
-        if chunks:
-            _VECTOR_STORE = InMemoryVectorStore.from_documents(chunks, embeddings)
-        else:
-            _VECTOR_STORE = InMemoryVectorStore(embedding=embeddings)
-    return _CHUNK_COUNT
+
+def apply_rag_settings(chunk_size, chunk_overlap) -> dict:
+    """校验并持久化新参数；候选索引或写盘失败时保留旧配置和旧索引。"""
+    global _RAG_SETTINGS, _VECTOR_STORE, _CHUNK_COUNT
+
+    settings = _validate_rag_settings(chunk_size, chunk_overlap)
+    with _INDEX_LOCK:
+        store, chunk_count = _build_index(list_documents(), settings)
+        _save_rag_settings(settings)
+        _RAG_SETTINGS = settings
+        _VECTOR_STORE = store
+        _CHUNK_COUNT = chunk_count
+    return get_rag_settings_info()
 
 
 def _ensure_index() -> InMemoryVectorStore:
@@ -216,6 +294,16 @@ def _ensure_index() -> InMemoryVectorStore:
         rebuild_index()
     assert _VECTOR_STORE is not None
     return _VECTOR_STORE
+
+
+def get_rag_settings_info() -> dict:
+    """返回前端设置面板所需的当前值、范围和实际片段数。"""
+    _ensure_index()
+    return {
+        **get_rag_settings(),
+        "chunk_count": _CHUNK_COUNT,
+        "limits": RAG_LIMITS,
+    }
 
 
 def search_documents(query: str, k: int = TOP_K) -> list[dict]:
@@ -254,6 +342,8 @@ class RagState(TypedDict):
     verdict: str
     answer: str
     sources: list
+    web_answer: str
+    web_sources: list
     max_score: float
 
 
@@ -325,12 +415,107 @@ def _node_generate(state: RagState) -> dict:
     return {"answer": MODEL.invoke(prompt).content.strip()}
 
 
+def _node_web(state: RagState) -> dict:
+    """每次检索后联网；本地相关时只找公开背景，不替代内部制度。"""
+    query = state.get("standalone") or state.get("question", "")
+    local_hit = state.get("verdict") == "相关"
+    instruction = (
+        "你是公开资料补充助手。用户问题已有本地制度资料，请根据公开网络搜索结果，"
+        "只补充相关概念、公开政策背景和通用说明。不要推测或修改特定学校、公司的内部制度，"
+        "不要给出与本地制度冲突的期限、金额、比例或流程。回答简洁，不编造来源。"
+        if local_hit
+        else
+        "你是联网补充问答助手。本地制度库没有可用资料，请根据公开网络搜索结果回答。"
+        "如果用户问的是特定学校或公司的内部制度，而搜索结果没有该机构的官方规定，"
+        "必须明确说明未查到，不能用其他机构的规定替代。回答简洁，不编造来源。"
+    )
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": query},
+    ]
+    try:
+        response = config.get_qwen_web_client().chat.completions.create(
+            model="qwen-plus",
+            messages=messages,
+            temperature=0.1,
+            enable_search=True,
+            search_options={
+                "forced_search": True,
+                "enable_source": True,
+                "enable_citation": True,
+                "citation_format": "[<number>]",
+            },
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        search_info = getattr(response, "search_info", None)
+        raw_sources = getattr(search_info, "search_results", []) or []
+        sources = []
+        for item in raw_sources:
+            title = str(getattr(item, "title", "") or "").strip()
+            url = str(getattr(item, "url", "") or "").strip()
+            if title and url.startswith(("http://", "https://")):
+                sources.append(
+                    {
+                        "type": "web",
+                        "index": getattr(item, "index", len(sources) + 1),
+                        "title": title,
+                        "url": url,
+                    }
+                )
+        return {"web_answer": answer if sources else "", "web_sources": sources}
+    except Exception as exc:
+        print(f"[web] 联网搜索失败，按现有结果降级：{type(exc).__name__}: {str(exc)[:300]}")
+        return {"web_answer": "", "web_sources": []}
+
+
+def _node_merge(state: RagState) -> dict:
+    """融合本地制度与公开背景；融合失败时保留已生成的本地答案。"""
+    local_answer = state.get("answer", "")
+    web_answer = state.get("web_answer", "")
+    prompt = (
+        "请根据本地制度资料和公开网络补充，回答用户问题。\n"
+        "规则：特定学校或公司的制度事实只能以本地资料为准；网络内容只补充公开概念、"
+        "政策背景和通用说明；如有冲突，舍弃网络内容；不得编造来源。"
+        "使用网络内容时保留其原引用编号，回答自然、简洁。\n\n"
+        f"本地资料：{state.get('context', '')}\n\n"
+        f"本地资料形成的答案：{local_answer}\n\n"
+        f"公开网络补充：{web_answer}\n\n"
+        f"问题：{state.get('standalone') or state.get('question', '')}"
+    )
+    try:
+        answer = MODEL.invoke(prompt).content.strip()
+        if not answer:
+            return {}
+    except Exception as exc:
+        print(f"[merge] 融合失败，保留本地答案：{type(exc).__name__}: {str(exc)[:300]}")
+        return {}
+    return {
+        "answer": answer,
+        "sources": list(state.get("sources") or []) + list(state.get("web_sources") or []),
+    }
+
+
+def _node_use_web(state: RagState) -> dict:
+    """本地资料不相关时采用联网答案，不展示无关本地片段。"""
+    return {
+        "answer": state.get("web_answer", ""),
+        "sources": state.get("web_sources") or [],
+    }
+
+
 def _node_fallback(state: RagState) -> dict:
     return {"answer": FALLBACK_ANSWER}
 
 
 def _route_after_grade(state: RagState) -> str:
-    return "generate" if state.get("verdict") == "相关" else "fallback"
+    return "generate" if state.get("verdict") == "相关" else "web"
+
+
+def _route_after_web(state: RagState) -> str:
+    web_ok = bool(state.get("web_answer") and state.get("web_sources"))
+    if state.get("verdict") == "相关":
+        return "merge" if web_ok else "end"
+    return "use_web" if web_ok else "fallback"
 
 
 _GRAPH_LOCK = threading.Lock()
@@ -343,6 +528,9 @@ def _build_graph():
     builder.add_node("retrieve", _node_retrieve)
     builder.add_node("grade", _node_grade)
     builder.add_node("generate", _node_generate)
+    builder.add_node("web", _node_web)
+    builder.add_node("merge", _node_merge)
+    builder.add_node("use_web", _node_use_web)
     builder.add_node("fallback", _node_fallback)
 
     builder.add_edge(START, "rewrite")
@@ -351,9 +539,16 @@ def _build_graph():
     builder.add_conditional_edges(
         "grade",
         _route_after_grade,
-        {"generate": "generate", "fallback": "fallback"},
+        {"generate": "generate", "web": "web"},
     )
-    builder.add_edge("generate", END)
+    builder.add_edge("generate", "web")
+    builder.add_conditional_edges(
+        "web",
+        _route_after_web,
+        {"merge": "merge", "end": END, "use_web": "use_web", "fallback": "fallback"},
+    )
+    builder.add_edge("merge", END)
+    builder.add_edge("use_web", END)
     builder.add_edge("fallback", END)
     return builder.compile()
 
@@ -426,6 +621,14 @@ def delete_session(session_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def _derive_answer_source(verdict: str | None, sources: list) -> str:
+    """由相关性和正式来源恢复回答类型，历史消息无需新增数据库字段。"""
+    has_web = any(item.get("type") == "web" for item in sources)
+    if verdict == "相关":
+        return "hybrid" if has_web else "local"
+    return "web" if has_web else "fallback"
+
+
 def get_messages(session_id: str) -> list[dict]:
     """按时间顺序返回会话消息，出处从 JSON 还原。"""
     with _db() as conn:
@@ -436,6 +639,10 @@ def get_messages(session_id: str) -> list[dict]:
         ).fetchall()
     messages = []
     for row in rows:
+        sources = _loads(row["sources_json"])
+        answer_source = None
+        if row["role"] == "assistant":
+            answer_source = _derive_answer_source(row["verdict"], sources)
         messages.append(
             {
                 "id": row["id"],
@@ -443,7 +650,8 @@ def get_messages(session_id: str) -> list[dict]:
                 "role": row["role"],
                 "content": row["content"],
                 "verdict": row["verdict"],
-                "sources": _loads(row["sources_json"]),
+                "answer_source": answer_source,
+                "sources": sources,
                 "elapsed_ms": row["elapsed_ms"],
                 "feedback": row["feedback"],
                 "created_at": row["created_at"],
@@ -562,6 +770,8 @@ def ask(question: str, session_id: str | None = None, history: list | None = Non
             "verdict": "",
             "answer": "",
             "sources": [],
+            "web_answer": "",
+            "web_sources": [],
             "max_score": 0.0,
         }
     )
@@ -569,7 +779,10 @@ def ask(question: str, session_id: str | None = None, history: list | None = Non
 
     verdict = result.get("verdict") or "不相关"
     answer = (result.get("answer") or "").strip() or FALLBACK_ANSWER
-    sources = (result.get("sources") or []) if verdict == "相关" else []
+    sources = result.get("sources") or []
+    answer_source = _derive_answer_source(verdict, sources)
+    if answer_source == "fallback":
+        sources = []
     standalone = result.get("standalone") or question
 
     message_id = _insert_message(
@@ -582,6 +795,7 @@ def ask(question: str, session_id: str | None = None, history: list | None = Non
         "message_id": message_id,
         "answer": answer,
         "verdict": verdict,
+        "answer_source": answer_source,
         "sources": sources,
         "standalone": standalone,
         "elapsed_ms": elapsed_ms,
@@ -610,7 +824,7 @@ def stats() -> dict:
         ).fetchone()[0]
         fallback_count = conn.execute(
             "SELECT COUNT(*) FROM messages WHERE role = 'assistant' AND verdict IS NOT NULL "
-            "AND verdict != '相关'"
+            "AND verdict != '相关' AND (sources_json IS NULL OR sources_json IN ('', '[]'))"
         ).fetchone()[0]
         avg_elapsed = conn.execute(
             "SELECT AVG(elapsed_ms) FROM messages WHERE role = 'assistant' "
@@ -649,6 +863,9 @@ if __name__ == "__main__":
     print(f"判断：{demo['verdict']}")
     print(f"回答：{demo['answer']}")
     print(f"耗时：{demo['elapsed_ms']} ms")
-    print("出处：", [f"{s['topic']}({s['score']})" for s in demo["sources"]])
+    print("出处：", [
+        s["title"] if s.get("type") == "web" else f"{s['topic']}({s['score']})"
+        for s in demo["sources"]
+    ])
     print("追问：", demo["suggestions"])
     print("统计：", stats())

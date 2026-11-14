@@ -151,6 +151,24 @@ def get_embeddings() -> OpenAIEmbeddings:
     )
 
 
+def get_qwen_web_client():
+    """创建千问原生客户端：联网搜索时返回网页标题和 URL。"""
+    try:
+        import dashscope
+    except ImportError as exc:
+        raise RuntimeError("缺少 dashscope，请先运行 pip install -r requirements.txt") from exc
+
+    cfg = _PROVIDERS["qwen"]
+    if not cfg["api_key"]:
+        raise RuntimeError("联网搜索需要千问 API Key，请填写 aliQwen-api。")
+    return dashscope.Client(
+        api_key=cfg["api_key"],
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+        timeout=60,
+        max_retries=2,
+    )
+
+
 def describe() -> str:
     """打印当前配置（不泄露 Key），排查问题时很有用。"""
     cfg = _PROVIDERS[PROVIDER]

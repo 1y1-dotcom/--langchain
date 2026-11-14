@@ -7,6 +7,7 @@ langchain-text-splitters>=1.0
 langgraph>=1.0
 langgraph-checkpoint-sqlite>=2.0
 python-dotenv>=1.0
+dashscope>=2.1           # 千问原生联网搜索，并返回网页标题和 URL
 loguru>=0.7
 numpy>=1.26          # InMemoryVectorStore 计算余弦相似度
 grandalf>=0.8        # 打印 LCEL / LangGraph 图结构

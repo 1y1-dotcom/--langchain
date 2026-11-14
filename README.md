@@ -3,10 +3,12 @@
 把课程案例中的 LangChain + LangGraph 核心主线重写成 16 个可独立运行、带中文注释的脚本，
 并在其上封装了具备产品形态的**校园制度问答应用**（网页 + 命令行）。
 
-- 输入问题 → 查询改写 → 检索制度文档 → 判断资料是否相关 → 回答并显示出处
+- 输入问题 → 查询改写 → 检索与判断 → 本地生成 → 联网补充/融合 → 分组显示本地与网页出处
 - 多轮会话存入 SQLite，支持切换 / 删除会话、点赞点踩、追问建议
 - 知识库可在页面里增删文档，增删后自动重建向量索引
-- 知识库外的问题不硬编，自动走兜底分支
+- 本地相关问题也会联网补充公开背景，融合时以本地制度为准；本地不相关则采用联网答案
+- 联网失败时，本地相关问题保留本地答案，本地不相关问题退回固定兜底
+- 页面可调整切块大小与重叠字符，保存配置并重建索引，重启后仍生效
 - 模型底座可切换：阿里千问 / DeepSeek，改 `.env` 即可，业务代码不动
 
 ---
@@ -24,6 +26,7 @@ ai-agents-repro/
 ├── cli_app.py            # ★ 统一入口：命令行制度问答助手
 ├── web_app.py            # ★ 网页版入口：浏览器问答页面（仅用标准库）
 ├── data/app.db           # 运行时自动生成的 SQLite（文档 / 会话 / 消息）
+├── data/rag_settings.json # 页面保存的切块参数（已在 .gitignore 中排除）
 │
 ├── 01_hello_model.py             # 模型调用三件套 / invoke / stream / batch
 ├── 02_model_params_messages.py   # temperature / max_tokens / 多角色消息
@@ -46,6 +49,7 @@ ai-agents-repro/
 代码导读.md                       # 逐章注释：每个脚本在讲什么
 答辩材料.md                       # 项目介绍、演示脚本、知识点问答
 实验报告.md                       # Vibe Coding 过程与心得
+15分钟汇报大纲.md                 # 上台时间轴与逐段讲稿
 ```
 
 ---
@@ -94,6 +98,9 @@ deepseek-chat-api = '你的 DeepSeek Key'
 - DeepSeek 申请地址：<https://platform.deepseek.com> → API keys
 - **DeepSeek 官方没有向量接口**。切到 `REPRO_PROVIDER=deepseek` 后，对话走 `deepseek-chat`，
   RAG 的向量自动借道千问，所以 `aliQwen-api` 仍然要填。
+- 网页版联网搜索固定使用千问 `qwen-plus` 和 DashScope 原生接口，以返回网页标题、URL 和引用角标；
+  DeepSeek 模式下联网同样借道千问。本地相关时，联网或融合失败都保留已生成的本地答案；
+  本地不相关且联网失败时才退回固定兜底。DeepSeek 模式的本地检索仍需要千问向量 Key。
 
 自检：
 
@@ -124,11 +131,11 @@ deepseek-chat-api = '你的 DeepSeek Key'
 
 - **两种模式**：制度问答（RAG + 出处）与自由对话（直接调模型、支持多轮），顶部一键切换，历史互不干扰
 - 左侧栏：服务状态、会话列表（切换 / 删除）、知识库文档（主题 + 字数，可删除，弹窗新增）、
-  统计卡片（提问数 / 兜底率 / 平均耗时 / 文档与片段数）
-- 右侧：消息气泡，回答带相关性徽章、检索步骤、耗时；出处卡片用进度条展示相似度
+  切块参数设置（大小 50~500、重叠 0~100，保存并重建索引）、统计卡片（提问数 / 固定兜底率 / 平均耗时 / 文档与片段数）
+- 右侧：消息气泡区分“本地 + 联网 / 制度文档 / 联网补充 / 联网失败·已兜底”；本地出处与公开网页背景分组显示，本地出处带相似度，网页标题可点击
 - 每条回答可点赞 / 点踩（写入数据库），并给出 3 条模板追问，点击直接继续问
 - 会话切换时从 `/api/sessions/<id>/messages` 拉取历史；新增 / 删除文档后自动重建索引
-- 常驻示例按钮：报销 / 年假 / 远程办公 / 知识库外兜底；自由对话下为概念解释 / 框架对比 / 写邮件 / 翻译
+- 常驻示例按钮：报销 / 年假 / 远程办公 / 联网补充；自由对话下为概念解释 / 框架对比 / 写邮件 / 翻译
 - 支持新建 / 清空对话、复制回答，手机端自适应
 
 网页版依赖的 JSON 接口（出错时返回带 `error` 字段的 JSON）：
@@ -138,6 +145,7 @@ deepseek-chat-api = '你的 DeepSeek Key'
 | GET | `/api/info` | 厂商、对话模型、向量模型、top_k |
 | GET / POST | `/api/docs` | 文档列表 / 新增文档 `{topic, content}` |
 | DELETE | `/api/docs/<id>` | 删除文档并重建索引 |
+| GET / POST | `/api/rag-settings` | 读取 / 保存 `{chunk_size, chunk_overlap}` 并重建索引 |
 | GET / POST | `/api/sessions` | 会话列表 / 新建会话 |
 | DELETE | `/api/sessions/<id>` | 删除会话及其消息 |
 | GET | `/api/sessions/<id>/messages` | 会话历史消息 |
@@ -146,8 +154,11 @@ deepseek-chat-api = '你的 DeepSeek Key'
 | GET | `/api/stats` | 统计面板数据 |
 | POST | `/api/chat` | `{messages}` 自由对话 |
 
+`/api/ask` 和历史消息包含 `answer_source`：`hybrid` 表示本地与联网融合，`local` 表示仅本地文档（含联网失败后的本地降级），
+`web` 表示仅联网答案，`fallback` 表示固定兜底。联网来源沿用 `sources` 字段，单项结构为 `{type:"web", index, title, url}`；本地来源仍包含 `topic/content/score`。
+
 会话、知识库和历史消息都存在 `data/app.db`（SQLite，第一次启动自动建库并写入 3 篇制度文档），
-删除该文件即可恢复初始状态。
+删除该文件即可恢复初始状态。切块参数单独保存在 `data/rag_settings.json`，默认 120/20；修改时会先构建候选索引，成功后原子写盘并切换，失败保留旧配置和旧索引。
 
 单个脚本：
 ```powershell
@@ -176,6 +187,8 @@ deepseek-chat-api = '你的 DeepSeek Key'
 | 带判断的 RAG | `16` | `grade` 节点 + 条件边 + `fallback` |
 | 服务层 | `rag_service.py` | SQLite 存文档/会话/消息，知识库增删后重建索引 |
 | 查询改写 | `rag_service.py` | 有历史时先把追问改写成独立问题，再检索 |
+| 联网融合 | `config.py` / `rag_service.py` | 本地相关时 generate→web→merge；失败保留本地。不相关时 web 成功则采用，失败固定兜底 |
+| 切块配置 | `rag_service.py` / `web_app.py` | 前后端双重校验，候选索引成功后保存 `rag_settings.json` 并原子切换 |
 | 统一入口 | `cli_app.py` / `web_app.py` | 命令行复用 16 的图；网页版走服务层，带会话与知识库管理 |
 
 ---
@@ -197,5 +210,5 @@ deepseek-chat-api = '你的 DeepSeek Key'
 
 - 代码按课程案例的知识点重写，每个脚本开头标注了对应的原仓库目录，便于对照阅读。
 - 与原仓库相比的主要改动：统一模型接入层、修复工具调用只跑一轮的问题、
-  结构化输出改用工具调用模式、RAG 增加相关性判断与兜底、补充中文注释。
+  结构化输出改用工具调用模式、RAG 增加相关性判断与固定兜底、网页工程版增加本地优先的联网融合、可调切块配置和完整应用闭环，并补充中文注释。
 - **提交时请勿包含 `.env`**（内含真实 Key），只提交 `.env-example`。

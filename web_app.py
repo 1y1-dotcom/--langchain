@@ -6,7 +6,7 @@
 浏览器打开 http://127.0.0.1:8000
 
 页面能力：
-    制度问答：调用 rag_service 的 RAG 图（查询改写 + 检索 + 相关性判断 + 生成/兜底）
+    制度问答：查询改写 + 本地检索 + 相关性判断 + 本地与联网融合/固定兜底
     自由对话：直接调用大模型，不检索、不入库
     左侧栏：会话列表、知识库增删、统计面板
 """
@@ -176,6 +176,17 @@ HTML = """<!DOCTYPE html>
     border-radius: 8px; cursor: pointer;
   }
   .ghost-btn:hover { border-color: #60a5fa; color: #dbeafe; }
+  .ghost-btn:disabled { opacity: .55; cursor: not-allowed; }
+  .rag-settings { margin: 10px 0; padding-top: 10px; border-top: 1px solid rgba(148, 163, 184, .14); }
+  .setting-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .setting-field label { display: block; margin-bottom: 4px; font-size: 10.5px; color: #94a3b8; }
+  .setting-field input {
+    width: 100%; padding: 6px 8px; border-radius: 7px;
+    border: 1px solid rgba(148, 163, 184, .3); background: rgba(15, 23, 42, .6);
+    color: #e2e8f0; font-size: 12px; outline: none;
+  }
+  .setting-field input:focus { border-color: #60a5fa; }
+  .settings-note { margin: 6px 0 8px; font-size: 10.5px; color: #64748b; line-height: 1.6; }
 
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .stat {
@@ -189,7 +200,7 @@ HTML = """<!DOCTYPE html>
   .side-foot { margin-top: auto; font-size: 10.5px; color: #475569; line-height: 1.8; }
 
   /* ---------- 主区 ---------- */
-  .main { display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
   .topbar {
     height: 60px; flex: 0 0 60px;
     display: flex; align-items: center; gap: 16px;
@@ -217,7 +228,11 @@ HTML = """<!DOCTYPE html>
   }
   .ghost:hover { border-color: #bfdbfe; color: var(--brand); }
 
-  .chat { flex: 1; overflow-y: auto; padding: 26px 24px 10px; scroll-behavior: smooth; }
+  .chat {
+    flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding: 26px 24px 10px; scroll-behavior: smooth;
+  }
   .chat-inner { max-width: 800px; margin: 0 auto; display: grid; gap: 18px; }
 
   .welcome { text-align: center; padding: 32px 10px 10px; }
@@ -257,6 +272,7 @@ HTML = """<!DOCTYPE html>
   .badge.ok { background: var(--ok-bg); color: var(--ok); }
   .badge.warn { background: var(--warn-bg); color: var(--warn); }
   .badge.free { background: #e0f2fe; color: #0369a1; }
+  .badge.web { background: #e0e7ff; color: #4f46e5; }
   .time { font-size: 11px; color: #94a3b8; margin-left: auto; }
 
   .steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
@@ -285,6 +301,8 @@ HTML = """<!DOCTYPE html>
   .bar { height: 4px; border-radius: 999px; background: #e2e8f0; margin: 6px 0; overflow: hidden; }
   .bar i { display: block; height: 100%; background: linear-gradient(90deg, #2563eb, #06b6d4); }
   .src p { margin: 4px 0 0; font-size: 12.5px; color: #475569; line-height: 1.75; }
+  .src-link { color: #2563eb; text-decoration: none; word-break: break-all; }
+  .src-link:hover { text-decoration: underline; }
 
   .feedback {
     display: flex; align-items: center; gap: 8px;
@@ -399,14 +417,35 @@ HTML = """<!DOCTYPE html>
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.ok { background: #065f46; }
 
-  @media (max-width: 900px) {
-    .app { grid-template-columns: 1fr; height: auto; min-height: 100vh; }
-    .sidebar { padding: 16px; }
+  .menu-btn { display: none; }
+  .scrim { display: none; }
+
+  @media (max-width: 720px) {
+    .app { grid-template-columns: 1fr; height: 100dvh; overflow: hidden; }
+    .sidebar {
+      position: fixed; top: 0; bottom: 0; left: 0; width: 84%; max-width: 330px;
+      z-index: 30; overflow-y: auto; transform: translateX(-100%);
+      transition: transform .25s ease; box-shadow: 12px 0 30px rgba(15, 23, 42, .18);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .scrim {
+      display: block; position: fixed; inset: 0; z-index: 25;
+      background: rgba(15, 23, 42, .45); opacity: 0; pointer-events: none;
+      transition: opacity .2s ease;
+    }
+    .scrim.show { opacity: 1; pointer-events: auto; }
+    .menu-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 34px; height: 34px; flex: 0 0 34px; border: 1px solid var(--line);
+      background: #fff; color: var(--ink); border-radius: 8px; font-size: 16px; cursor: pointer;
+    }
+    .main { min-height: 0; }
     .chat { padding: 18px 14px 8px; }
     .cards { grid-template-columns: 1fr; }
     .bubble { max-width: 92%; }
     .composer-wrap { padding: 8px 14px 14px; }
-    .topbar { padding: 0 14px; gap: 10px; }
+    .topbar { padding: 0 12px; gap: 8px; }
+    .current { display: none; }
   }
 </style>
 </head>
@@ -433,6 +472,20 @@ HTML = """<!DOCTYPE html>
     <section class="panel">
       <h2>知识库 <em id="doc-count">—</em></h2>
       <div id="docs" class="doc-list"></div>
+      <div class="rag-settings">
+        <div class="setting-row">
+          <div class="setting-field">
+            <label for="chunk-size">切块大小（50~500）</label>
+            <input id="chunk-size" type="number" min="50" max="500" step="10" value="120">
+          </div>
+          <div class="setting-field">
+            <label for="chunk-overlap">重叠字符（0~100）</label>
+            <input id="chunk-overlap" type="number" min="0" max="100" step="5" value="20">
+          </div>
+        </div>
+        <p class="settings-note" id="settings-note">重叠字符必须小于切块大小，修改后需重建索引。</p>
+        <button class="ghost-btn" id="apply-rag-settings">应用并重建索引</button>
+      </div>
       <button class="ghost-btn" id="add-doc">+ 添加文档</button>
     </section>
 
@@ -449,12 +502,14 @@ HTML = """<!DOCTYPE html>
     <div class="side-foot">
       模型：<span id="model-name">—</span><br>
       向量：<span id="embed-name">—</span><br>
-      检索：<span id="topk">k=2</span> · 制度问答仅依据知识库
+      检索：<span id="topk">k=2</span> · 本地制度优先 · 每次联网融合补充
     </div>
   </aside>
+  <div class="scrim" id="scrim"></div>
 
   <main class="main">
     <div class="topbar">
+      <button class="menu-btn" id="menu-btn" aria-label="打开侧栏">☰</button>
       <div class="tabs">
         <button class="tab active" data-mode="rag">制度问答</button>
         <button class="tab" data-mode="free">自由对话</button>
@@ -468,7 +523,7 @@ HTML = """<!DOCTYPE html>
       <div class="chat-inner" id="rag-inner">
         <div class="welcome" id="rag-welcome">
           <h2>有什么制度问题，直接问我</h2>
-          <p>我会先改写问题、检索制度文档，判断资料是否足够，再给出回答和出处。<br>知识库里没有的内容，我会明确告诉你。</p>
+          <p>我会先改写问题、检索制度文档，再结合公开网络补充背景。<br>本地制度始终优先，联网失败时仍保留本地答案。</p>
           <div class="cards" id="rag-cards"></div>
         </div>
       </div>
@@ -491,7 +546,7 @@ HTML = """<!DOCTYPE html>
         <textarea id="question" rows="1" placeholder="输入你的问题…"></textarea>
         <button type="submit" id="ask">发送</button>
       </form>
-      <div class="composer-hint" id="hint">Enter 发送 · Shift + Enter 换行 · 回答仅依据知识库</div>
+      <div class="composer-hint" id="hint">Enter 发送 · Shift + Enter 换行 · 本地制度优先 · 无资料时联网补充</div>
     </div>
   </main>
 </div>
@@ -523,7 +578,7 @@ HTML = """<!DOCTYPE html>
     { title: '报销制度', q: '出差报销需要在几天内提交？超过 5000 元要谁审批？', hint: '差旅 · 审批流程' },
     { title: '年假制度', q: '入职满三年有几天年假？需要提前几天申请？', hint: '假期 · 申请规则' },
     { title: '远程办公', q: '每周可以远程办公几天？试用期员工适用吗？', hint: '办公 · 适用人群' },
-    { title: '知识库外', q: '公司食堂中午几点开饭？', hint: '演示兜底分支' }
+    { title: '联网补充', q: 'LangChain 官方文档的入口是什么？', hint: '本地无资料时联网检索' }
   ];
   const FREE_EXAMPLES = [
     { title: '解释概念', q: '用三句话解释什么是 RAG，并举一个例子。', hint: '学习 · 概念解释' },
@@ -547,6 +602,7 @@ HTML = """<!DOCTYPE html>
   let sessions = [];
   let ragHistory = [];    // 当前会话的制度问答历史，用于查询改写
   let freeHistory = [];   // 自由对话历史，只存在浏览器内存里
+  let savedRagSettings = { chunk_size: 120, chunk_overlap: 20 };
 
   // ---------- 网络请求统一封装 ----------
   async function api(path, options) {
@@ -585,6 +641,29 @@ HTML = """<!DOCTYPE html>
     $('model-name').textContent = info.chat_model;
     $('embed-name').textContent = info.embedding_model;
     $('topk').textContent = 'k=' + info.top_k;
+  }
+
+  function fillRagSettings(data) {
+    savedRagSettings = {
+      chunk_size: Number(data.chunk_size),
+      chunk_overlap: Number(data.chunk_overlap)
+    };
+    $('chunk-size').value = savedRagSettings.chunk_size;
+    $('chunk-overlap').value = savedRagSettings.chunk_overlap;
+    if (data.limits) {
+      $('chunk-size').min = data.limits.chunk_size.min;
+      $('chunk-size').max = data.limits.chunk_size.max;
+      $('chunk-overlap').min = data.limits.chunk_overlap.min;
+      $('chunk-overlap').max = data.limits.chunk_overlap.max;
+    }
+    if (Number.isInteger(data.chunk_count)) {
+      $('settings-note').textContent = '当前 ' + data.chunk_size + ' / ' + data.chunk_overlap +
+        ' · 共 ' + data.chunk_count + ' 段 · 重叠字符必须小于切块大小';
+    }
+  }
+
+  async function loadRagSettings() {
+    fillRagSettings(await api('/api/rag-settings'));
   }
 
   async function loadDocs() {
@@ -690,7 +769,7 @@ HTML = """<!DOCTYPE html>
         addUser(m.content, ragInner, ragChat);
       } else {
         addRagBot(
-          { answer: m.content, verdict: m.verdict || '不相关', sources: m.sources || [], elapsed_ms: m.elapsed_ms || 0, suggestions: [] },
+          { answer: m.content, verdict: m.verdict || '不相关', answer_source: m.answer_source, sources: m.sources || [], elapsed_ms: m.elapsed_ms || 0, suggestions: [] },
           { message_id: m.id, feedback: m.feedback }
         );
       }
@@ -733,7 +812,7 @@ HTML = """<!DOCTYPE html>
       ragChat.classList.toggle('hidden', mode !== 'rag');
       freeChat.classList.toggle('hidden', mode !== 'free');
       hint.textContent = mode === 'rag'
-        ? 'Enter 发送 · Shift + Enter 换行 · 回答仅依据知识库'
+        ? 'Enter 发送 · Shift + Enter 换行 · 本地制度优先 · 每次联网融合补充'
         : 'Enter 发送 · Shift + Enter 换行 · 直接调用大模型，不检索知识库';
       input.placeholder = mode === 'rag' ? '输入你的制度问题…' : '想问点什么？写作、翻译、解释都可以…';
       renderQuick();
@@ -793,6 +872,19 @@ HTML = """<!DOCTYPE html>
     input.focus();
   });
 
+  // ---------- 移动端侧栏 ----------
+  const sidebarEl = document.querySelector('.sidebar');
+  const scrimEl = $('scrim');
+  const closeSidebar = () => {
+    sidebarEl.classList.remove('open');
+    scrimEl.classList.remove('show');
+  };
+  $('menu-btn').addEventListener('click', () => {
+    sidebarEl.classList.toggle('open');
+    scrimEl.classList.toggle('show');
+  });
+  scrimEl.addEventListener('click', closeSidebar);
+
   // ---------- 渲染工具 ----------
   function scrollBottom(box) {
     requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
@@ -851,12 +943,41 @@ HTML = """<!DOCTYPE html>
     opts = opts || {};
     const ok = data.verdict === '相关';
     const sources = data.sources || [];
+    const hasWeb = sources.some(s => s.type === 'web');
+    const inferredSource = ok ? (hasWeb ? 'hybrid' : 'local') : (hasWeb ? 'web' : 'fallback');
+    const answerSource = data.answer_source || inferredSource;
+    const isHybrid = answerSource === 'hybrid';
+    const isWebOnly = answerSource === 'web';
+    const isFallback = answerSource === 'fallback';
+    const badgeClass = isFallback ? 'warn' : (isHybrid || isWebOnly ? 'web' : 'ok');
+    const badgeText = {
+      hybrid: '本地 + 联网', local: '制度文档', web: '联网补充', fallback: '联网失败 · 已兜底'
+    }[answerSource] || '制度文档';
+    const localSources = sources.filter(s => s.type !== 'web');
+    const webSources = sources.filter(s => s.type === 'web');
 
     const steps = [
-      { name: '检索', detail: sources.length ? '命中 ' + sources.length + ' 段' : '无相关资料' },
-      { name: '相关性判断', detail: data.verdict || '—' },
-      { name: ok ? '生成' : '兜底', detail: ok ? '已生成' : '已拦截' }
+      { name: '本地检索', detail: ok ? '命中 ' + localSources.length + ' 段' : '资料不可用' },
+      { name: '相关性判断', detail: data.verdict || '—' }
     ];
+    if (ok) {
+      steps.push({ name: '本地生成', detail: '已生成' });
+      if (isHybrid) {
+        steps.push(
+          { name: '联网搜索', detail: '已补充公开背景' },
+          { name: '融合回答', detail: '本地制度优先' }
+        );
+      } else {
+        steps.push({ name: '联网搜索', detail: '未获得有效结果 · 使用本地答案' });
+      }
+    } else if (isWebOnly) {
+      steps.push({ name: '联网搜索', detail: '已生成' });
+    } else {
+      steps.push(
+        { name: '联网搜索', detail: '未获得有效结果' },
+        { name: '固定兜底', detail: '已拦截' }
+      );
+    }
     if (data.standalone && opts.question && data.standalone !== opts.question) {
       steps.unshift({ name: '查询改写', detail: data.standalone });
     }
@@ -864,16 +985,29 @@ HTML = """<!DOCTYPE html>
       '<span class="step">' + esc(s.name) + ' <b>' + esc(s.detail) + '</b></span>'
     )).join('');
 
-    const sourcesHtml = sources.length ? (
-      '<div class="sources"><h3>出处</h3>' + sources.map(s => {
-        const pct = Math.max(0, Math.min(100, Math.round((s.score || 0) * 100)));
+    function renderSource(s, i) {
+      if (s.type === 'web') {
+        const url = String(s.url || '');
+        if (!/^https?:\/\//i.test(url)) return '';
+        const title = '[' + (s.index || i + 1) + '] ' + (s.title || url);
         return '<div class="src">' +
-          '<div class="src-head"><b>' + esc(s.topic) + '</b><span class="score">相似度 ' + pct + '%</span></div>' +
-          '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
-          '<p>' + esc(s.content) + '</p>' +
+          '<div class="src-head"><b>' + esc(title) + '</b></div>' +
+          '<p><a class="src-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(url) + '</a></p>' +
         '</div>';
-      }).join('') + '</div>'
-    ) : '';
+      }
+      const pct = Math.max(0, Math.min(100, Math.round((s.score || 0) * 100)));
+      return '<div class="src">' +
+        '<div class="src-head"><b>' + esc(s.topic) + '</b><span class="score">相似度 ' + pct + '%</span></div>' +
+        '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+        '<p>' + esc(s.content) + '</p>' +
+      '</div>';
+    }
+    function renderSourceGroup(title, items) {
+      return items.length ? '<div class="sources"><h3>' + esc(title) + '</h3>' +
+        items.map(renderSource).join('') + '</div>' : '';
+    }
+    const sourcesHtml = renderSourceGroup('本地制度出处', localSources) +
+      renderSourceGroup('公开网页背景', webSources);
 
     const mid = opts.message_id;
     const voted = opts.feedback === 1 || opts.feedback === -1 ? opts.feedback : 0;
@@ -898,7 +1032,7 @@ HTML = """<!DOCTYPE html>
       '<div class="avatar">AI</div>' +
       '<div class="bubble">' +
         '<div class="meta">' +
-          '<span class="badge ' + (ok ? 'ok' : 'warn') + '">' + (ok ? '资料相关' : '资料不相关 · 已兜底') + '</span>' +
+          '<span class="badge ' + badgeClass + '">' + badgeText + '</span>' +
           '<span class="time">' + (data.elapsed_ms || 0) + ' ms</span>' +
         '</div>' +
         '<div class="text">' + esc(data.answer) + '</div>' +
@@ -1021,6 +1155,52 @@ HTML = """<!DOCTYPE html>
     }
   }
 
+  // ---------- 切块配置：校验、保存并重建 ----------
+  $('apply-rag-settings').addEventListener('click', async () => {
+    const sizeText = $('chunk-size').value.trim();
+    const overlapText = $('chunk-overlap').value.trim();
+    const chunkSize = Number(sizeText);
+    const chunkOverlap = Number(overlapText);
+    if (!/^\d+$/.test(sizeText) || !/^\d+$/.test(overlapText) ||
+        !Number.isInteger(chunkSize) || !Number.isInteger(chunkOverlap)) {
+      toast('切块大小和重叠字符都必须是整数');
+      return;
+    }
+    if (chunkSize < 50 || chunkSize > 500) {
+      toast('切块大小必须在 50~500 之间');
+      return;
+    }
+    if (chunkOverlap < 0 || chunkOverlap > 100) {
+      toast('重叠字符必须在 0~100 之间');
+      return;
+    }
+    if (chunkOverlap >= chunkSize) {
+      toast('重叠字符必须小于切块大小');
+      return;
+    }
+
+    const btn = $('apply-rag-settings');
+    btn.disabled = true;
+    btn.textContent = '正在重建索引…';
+    try {
+      const data = await api('/api/rag-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chunk_size: chunkSize, chunk_overlap: chunkOverlap })
+      });
+      fillRagSettings(data);
+      await loadStats();
+      toast('配置已保存，索引重建完成', 'ok');
+    } catch (e) {
+      $('chunk-size').value = savedRagSettings.chunk_size;
+      $('chunk-overlap').value = savedRagSettings.chunk_overlap;
+      toast('应用失败，已保留原配置：' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '应用并重建索引';
+    }
+  });
+
   // ---------- 添加文档弹窗 ----------
   function openModal() {
     $('modal').classList.remove('hidden');
@@ -1073,6 +1253,7 @@ HTML = """<!DOCTYPE html>
   (async function init() {
     try { await loadInfo(); } catch (e) { toast('服务连接失败：' + e.message); }
     try { await loadDocs(); } catch (e) { toast('知识库加载失败：' + e.message); }
+    try { await loadRagSettings(); } catch (e) { toast('切块配置加载失败：' + e.message); }
     try { await loadStats(); } catch (e) { toast('统计加载失败：' + e.message); }
     try { await loadSessions(true); } catch (e) { toast('会话加载失败：' + e.message); }
   })();
@@ -1122,6 +1303,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, INFO)
         elif path == "/api/docs":
             self._send_json(200, rag_service.list_documents())
+        elif path == "/api/rag-settings":
+            self._send_json(200, rag_service.get_rag_settings_info())
         elif path == "/api/stats":
             self._send_json(200, rag_service.stats())
         elif path == "/api/sessions":
@@ -1140,6 +1323,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_chat()
         elif path == "/api/docs":
             self._handle_add_doc()
+        elif path == "/api/rag-settings":
+            self._handle_rag_settings()
         elif path == "/api/sessions":
             payload = self._read_json()
             self._send_json(200, rag_service.create_session(payload.get("title")))
@@ -1183,6 +1368,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
             return
         self._send_json(200, {"ok": True, "doc": doc})
+
+    def _handle_rag_settings(self) -> None:
+        payload = self._read_json()
+        try:
+            result = rag_service.apply_rag_settings(
+                payload.get("chunk_size"), payload.get("chunk_overlap")
+            )
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, **result})
 
     def _handle_feedback(self) -> None:
         payload = self._read_json()
